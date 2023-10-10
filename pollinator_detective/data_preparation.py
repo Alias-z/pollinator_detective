@@ -31,7 +31,7 @@ class Data4Training:
 
     def ensemble_files(self, output_dir):
         """Ensemble all images and json files"""
-        os.makedirs(output_dir)  # create output directory
+        os.makedirs(output_dir, exist_ok=True)  # create output directory
         subfolders = os.listdir(self.input_dir)  # list all subfolders
         for subfolder in subfolders:
             file_names = sorted(os.listdir(os.path.join(self.input_dir, subfolder)), key=str.casefold)  # sort file names
@@ -97,18 +97,20 @@ class Data4Training:
         with open(json_path, 'w', encoding='utf-8') as file:
             json.dump(annotation_data, file)
 
-    def data4training(self, sahi_mode=True):
+    def data4training(self, if_resize_isat=False, if_center_crop=False, sahi_mode=True):
         """generate data for training stomata instance segmentation from ISAT json files"""
         input_copy_dir = self.input_dir + ' - Copy'  # folder copy dir
         self.ensemble_files(input_copy_dir)  # create a copy
-        resize_isat(input_copy_dir, new_width=self.new_width, new_height=self.new_height)  # resize images and annotations
+        if if_resize_isat:
+            resize_isat(input_copy_dir, new_width=self.new_width, new_height=self.new_height)  # resize images and annotations
         file_names = sorted(os.listdir(input_copy_dir), key=str.casefold)  # sort file names
         image_file_names = [name for name in file_names if any(name.lower().endswith(file_type) for file_type in image_types)]  # image files only
         json_file_names = [name for name in file_names if any(name.lower().endswith(file_type) for file_type in ['.json'])]  # json files only
-        for idx, image_file_name in tqdm(enumerate(image_file_names), total=len(image_file_names)):
-            image_path = os.path.join(input_copy_dir, image_file_name)
-            json_path = os.path.join(input_copy_dir, json_file_names[idx])
-            self.center_crop(image_path, json_path)
+        if if_center_crop:
+            for idx, image_file_name in tqdm(enumerate(image_file_names), total=len(image_file_names)):
+                image_path = os.path.join(input_copy_dir, image_file_name)
+                json_path = os.path.join(input_copy_dir, json_file_names[idx])
+                self.center_crop(image_path, json_path)
         output_name = 'Bug_mmdet'  # for object detection
         output_dir = os.path.join(os.path.split(input_copy_dir)[0], output_name)  # COCO json output dir
         train_dir = os.path.join(output_dir, 'train')  # COCO json train dir
@@ -116,23 +118,24 @@ class Data4Training:
         data_split(input_copy_dir, output_dir, r_train=self.r_train)  # split train and val
         to_coco(train_dir, output_dir=os.path.join(train_dir, 'COCO.json'))  # convert train ISAT json files to COCO
         to_coco(val_dir, output_dir=os.path.join(val_dir, 'COCO.json'))  # same for val
+        shutil.rmtree(input_copy_dir)
         if sahi_mode:
             for folder in ['train', 'val']:
                 slice_coco(
-                    coco_annotation_file_path=train_dir.replace(folder, folder) + '//COCO.json',
-                    image_dir=train_dir.replace(folder, folder),
+                    coco_annotation_file_path=train_dir.replace('train', folder) + '//COCO.json',
+                    image_dir=train_dir.replace('train', folder),
                     output_coco_annotation_file_name="sliced",
                     ignore_negative_samples=True,
-                    output_dir=train_dir.replace(folder, folder).replace(folder, folder + '_sliced'),
+                    output_dir=train_dir.replace('train', folder).replace(folder, folder + '_sliced'),
                     slice_height=int(self.new_height / self.sahi_slices / self.sahi_overlap_ratio),
                     slice_width=int(self.new_width / self.sahi_slices / self.sahi_overlap_ratio),
                     overlap_height_ratio=1 - self.sahi_overlap_ratio,
                     overlap_width_ratio=1 - self.sahi_overlap_ratio,
                     min_area_ratio=0.1,
                     verbose=False)
-                coco_dict = load_json(train_dir.replace(folder, folder) + '//train_sliced.json')
-                good_path_names = [coco_dict["images"][idx]['file_name'] for idx, _ in  enumerate(coco_dict["images"])]
-                images_dir = train_dir.replace(folder, folder).replace(folder, folder + '_sliced')
+                coco_dict = load_json(train_dir.replace('train', folder).replace(folder, folder + '_sliced') + '//sliced_coco.json')
+                good_path_names = [coco_dict["images"][idx]['file_name'] for idx, _ in enumerate(coco_dict["images"])]
+                images_dir = train_dir.replace('train', folder).replace('train', folder + '_sliced')
                 all_file_names = [name for name in os.listdir(images_dir) if any(name.lower().endswith(file_type) for file_type in image_types)]
                 for name in all_file_names:
                     if name not in good_path_names:

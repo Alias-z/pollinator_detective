@@ -1,18 +1,14 @@
 """Module providing functions for counting pollinator visiting events"""
 # pylint: disable=line-too-long, multiple-statements, c-extension-no-member, no-member, no-name-in-module, relative-beyond-top-level, wildcard-import
 import os  # interact with the operating system
-import shutil  # for copying and pasting files
 import cv2  # OpenCV
-import torch  # PyTorch
 import numpy as np  # NumPy
 import pandas as pd  # for Excel sheet
-from matplotlib import pyplot as plt
 from tqdm import tqdm
 from mmdet.utils import register_all_modules as mmdet_utils_register_all_modules  # register mmdet modules
-from mmdet.apis import init_detector as mmdet_apis_init_detector  # initialize mmdet model
-from mmdet.apis import inference_detector as mmdet_apis_inference_detector  # mmdet inference detector
-from mmpretrain import ImageClassificationInferencer as classifier  # classify bugs
-from .core import device, image_types, video_types, imread_rgb
+from sahi import AutoDetectionModel  # loads a DetectionModel from given path
+from sahi.predict import get_sliced_prediction  # detect bugs from frame slices
+from .core import device, image_types, video_types, imread_rgb  # import core functions
 
 
 class SegColors:
@@ -35,10 +31,12 @@ class VisitingEvents():
     """Counting pollinator visiting events"""
     def __init__(self,
                  input_dir: str,
-                 output_name: str = 'Results',
-                 batch_size: int = 100,
                  detector_config_path: str = None,
                  detector_weight_path: str = None,
+                 new_width: int = 1920,
+                 new_height: int = 1080,
+                 sahi_slices: int = 5,
+                 sahi_overlap_ratio: float = 0.7,
                  bumblebees_threshold: float = 0.9,
                  flies_threshold: float = 0.9,
                  honeybees_threshold: float = 0.9,
@@ -47,10 +45,12 @@ class VisitingEvents():
                  wildbees_threshold: float = 0.9,
                  ):
         self.input_dir = os.path.normpath(input_dir)  # input directory
-        self.output_name = output_name  # output folder name
-        self.batch_size = batch_size  # inference batch size
         self.detector_config_path = detector_config_path  # object detection config path
         self.detector_weight_path = detector_weight_path  # object detection weight path
+        self.new_width = new_width  # new width after resizing
+        self.new_height = new_height  # new height after resizing
+        self.sahi_slices = sahi_slices  # numbder of slice to crop from each direction, total patch will be the sqaured
+        self.sahi_overlap_ratio = sahi_overlap_ratio  # fractional overlap in width of eachslice
         self.bumblebees_threshold = bumblebees_threshold  # object detection threshold for bumblebees
         self.flies_threshold = flies_threshold  # object detection threshold for flies
         self.honeybees_threshold = honeybees_threshold  # object detection threshold for honeybees
@@ -99,15 +99,41 @@ class VisitingEvents():
         os.makedirs(output_dir, exist_ok=True)
         frame_names = [name for name in os.listdir(folder_path) if any(name.lower().endswith(file_type) for file_type in image_types)]
         mmdet_utils_register_all_modules(init_default_scope=False)  # initialize mmdet scope
-        detector = mmdet_apis_init_detector(self.detector_config_path, self.detector_weight_path, device=device)  # initialize a detector from config file
+        detector = AutoDetectionModel.from_pretrained(model_type='mmdet',
+                                                      model_path=self.detector_weight_path,
+                                                      config_path=self.detector_config_path,
+                                                      confidence_threshold=0.1,
+                                                      image_size=self.new_width,
+                                                      device=device)
+
+        def detect_bug(image_path):
+            """Return sliced detection results"""
+            result = get_sliced_prediction(
+                image_path,
+                detector,
+                slice_height=int(self.new_height / self.sahi_slices / self.sahi_overlap_ratio),
+                slice_width=int(self.new_width / self.sahi_slices / self.sahi_overlap_ratio),
+                overlap_height_ratio=1 - self.sahi_overlap_ratio,
+                overlap_width_ratio=1 - self.sahi_overlap_ratio,
+                perform_standard_pred=False,
+                postprocess_type='GREEDYNMM',  # 'NMM', 'GRREDYNMM' or 'NMS'. Default is 'GRREDYNMM'.
+                postprocess_match_metric='IOS',  # 'IOU' for intersection over union, 'IOS' for intersection over smaller area.
+                postprocess_match_threshold=0.6,
+                verbose=0)
+            return result
+
         n_bugs = []
         for idx, frame_name in tqdm(enumerate(frame_names), total=len(frame_names)):
+            # print(f'{idx + 1} out of {len(frame_names) + 1}')
             image = imread_rgb(os.path.join(folder_path, frame_name))
-            prediction = mmdet_apis_inference_detector(detector, image)
+            result = detect_bug(image)
+            prediction_labels = np.array([result.to_coco_annotations()[idx]['category_id'] for idx, _ in enumerate(result.to_coco_annotations())])
+            prediction_scores = np.array([result.to_coco_annotations()[idx]['score'] for idx, _ in enumerate(result.to_coco_annotations())])
+            prediction_bboxes = np.array([result.to_coco_annotations()[idx]['bbox'] for idx, _ in enumerate(result.to_coco_annotations())])
             n_bumblebees, n_flies, n_honeybees, n_hoverfly_a, n_hoverfly_b, n_wildbees = 0, 0, 0, 0, 0, 0
             for bug_idx, bug in enumerate(Bug):
                 threshold = getattr(self, f"{bug.class_name.lower()}_threshold")
-                indices = torch.where((prediction.pred_instances.labels == bug_idx) & (prediction.pred_instances.scores > threshold))[0]
+                indices = np.where((prediction_labels == bug_idx) & (prediction_scores > threshold))[0]
                 if len(indices) > 0:
                     if bug.class_name == 'Bumblebees':
                         n_bumblebees += len(indices)
@@ -121,10 +147,10 @@ class VisitingEvents():
                         n_hoverfly_b += len(indices)
                     elif bug.class_name == 'Wildbees':
                         n_wildbees += len(indices)
-                    bboxes = [prediction.pred_instances.bboxes[ind].cpu().numpy() for ind in indices]
+                    bboxes = [prediction_bboxes[ind] for ind in indices]
                     bboxes = [np.array(bbox, dtype=np.int32) for bbox in bboxes]
-                    locations = [(x_1, y_1, x_2, y_2) for x_1, y_1, x_2, y_2 in bboxes]
-                    scores = [prediction.pred_instances.scores[ind].cpu().numpy().item() for ind in indices]
+                    locations = [(x_1, y_1, x_1 + width, y_1 + height) for x_1, y_1, width, height in bboxes]
+                    scores = [prediction_scores[ind] for ind in indices]
                     for idx, location in enumerate(locations):
                         x_1, y_1, x_2, y_2 = location
                         cv2.rectangle(image, (x_1, y_1), (x_2, y_2), bug.mask_rgb, 4)
@@ -226,65 +252,3 @@ class VisitingEvents():
         for folder_dir in tqdm(folder_dirs, total=len(folder_dirs)):
             self.counts2excel(folder_dir, absence_window_range=absence_window_range)
         return None
-
-
-
-
-################################################################ legacy #################################################################
-
-
-def bug_classifier(video_name, config='Models//EVA///mmpretrain_bugs.py', weights='Models//EVA//best_accuracy_top1_epoch_105.pth', sort2train=True):
-    """classify bugs for each video frame under a given folder"""
-    model = classifier(model=config, pretrained=weights)
-    image_paths = [os.path.join(video_name, path) for path in os.listdir(video_name) if any(path.endswith(file_type) for file_type in image_types)]
-    if sort2train:
-        results = model(image_paths, batch_size=1)
-        scores = [result['pred_score'] for result in results]
-        classes = [result['pred_class'] for result in results]
-        class_dirs = []
-        for class_name in classes:
-            os.makedirs(os.path.join(video_name, class_name), exist_ok=True)
-            class_dirs.append(os.path.join(video_name, class_name))
-        for idx, image_path in enumerate(image_paths):
-            source = image_path
-            if scores[idx] > 0.8:
-                destination = os.path.join(class_dirs[idx], os.path.basename(image_path))
-            else:
-                os.makedirs(os.path.join(video_name, 'No_insects'), exist_ok=True)
-                destination = os.path.join(video_name, 'No_insects', os.path.basename(image_path))
-            shutil.copyfile(source, destination) 
-            os.remove(source)
-    else:
-        results = model(image_paths, batch_size=1, show_dir=video_name + ' Results')
-        scores = [result['pred_score'] for result in results]
-        classes = [result['pred_class'] for result in results]
-    return scores, classes
-
-
-def find_visiting_events(frames, absence_window=2):
-    """find all visiting events
-    1. Initially, we are not in an event.
-    2. Whenever we encounter a frame that is not "No_insects", we start an event.
-    3. Whenever we encounter a frame that is "No_insects", we look ahead in the next "absence_window" frames:
-           If we find any frame that is not "No_insects", we continue with the current event. If not, the event ends.
-    4. We will use "nothing" to denote frames that are not part of an event, and "Visiting X" to denote frames that are part of visiting event X.
-    """
-    events = [""] * len(frames)
-    current_event, in_event = 0, False
-    for i in range(len(frames)):
-        # If we are not in an event and we encounter insects
-        if not in_event and frames[i] != 'No_insects':
-            in_event = True
-            current_event += 1
-            events[i] = f"Visiting {current_event}"
-        elif in_event and frames[i] == 'No_insects':
-            # Look ahead in the next "absence_window" frames
-            if any(frame != 'No_insects' for frame in frames[i:min(i+absence_window, len(frames))]):
-                # If we find insects in the next "absence_window" frames, continue with the current event
-                events[i] = f"Visiting {current_event}"
-            else:
-                # If we don't find insects in the next "absence_window" frames, the event ends
-                in_event = False
-        elif in_event:
-            events[i] = f"Visiting {current_event}"
-    return events

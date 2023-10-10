@@ -39,12 +39,12 @@ def resize_isat(input_dir, new_width=1280, new_height=960):
         data['info']['height'] = new_height  # resized height
         for obj in data['objects']:
             for point in obj['segmentation']:
-                point[0] = point[0] * width_ratio  # update width
-                point[1] = point[1] * height_ratio  # update height
-            obj['bbox'][0] = obj['bbox'][0] * width_ratio  # update bbox x1
-            obj['bbox'][1] = obj['bbox'][1] * height_ratio  # bbox y1
-            obj['bbox'][2] = obj['bbox'][2] * width_ratio  # bbox x2
-            obj['bbox'][3] = obj['bbox'][3] * height_ratio  # bbox y2
+                point[0] = int(point[0] * width_ratio)  # update width
+                point[1] = int(point[1] * height_ratio)  # update height
+            obj['bbox'][0] = int(obj['bbox'][0] * width_ratio)  # update bbox x1
+            obj['bbox'][1] = int(obj['bbox'][1] * height_ratio)  # bbox y1
+            obj['bbox'][2] = int(obj['bbox'][2] * width_ratio)  # bbox x2
+            obj['bbox'][3] = int(obj['bbox'][3] * height_ratio)  # bbox y2
         with open(json_path, 'w', encoding='utf-8') as file:
             json.dump(data, file, indent=4)  # save the sorted json data
     image_names = [name for name in os.listdir(input_dir) if any(name.endswith(file_type) for file_type in image_types)]  # get images names
