@@ -26,6 +26,8 @@ Bug = [SegColors('Bumblebees', [100, 0, 0], 0),
        SegColors('Hoverfly_B', [100, 0, 50], 4),
        SegColors('Wildbees', [33, 100, 100], 5)]
 
+bug_color = {bug.class_name: bug.mask_rgb for bug in Bug}
+
 
 class VisitingEvents():
     """Counting pollinator visiting events"""
@@ -122,41 +124,78 @@ class VisitingEvents():
                 verbose=0)
             return result
 
+        def bboxes_postprocess(bboxes, labels, scores):
+            """Remove smaller bounding boxes that overlap with a larger one for MSCOCO format
+            based on the overlap criteria."""
+            bboxes = np.array(bboxes)  # convert list to np.array
+            scores = np.array(scores)
+            labels = np.array(labels)
+            to_remove = set()  # initialize the set of bboxes to be removed
+            areas = bboxes[:, 2] * bboxes[:, 3]  # calculate area for all bounding boxes
+            new_scores = scores.copy()
+            new_labels = labels.copy()
+            for idx, _ in enumerate(bboxes):
+                for idx_j in range(idx + 1, len(bboxes)):
+                    if idx in to_remove or idx_j in to_remove:
+                        continue
+                    bbox1 = bboxes[idx]
+                    bbox2 = bboxes[idx_j]
+                    x_overlap_start = max(bbox1[0], bbox2[0])
+                    x_overlap_end = min(bbox1[0] + bbox1[2], bbox2[0] + bbox2[2])
+                    y_overlap_start = max(bbox1[1], bbox2[1])
+                    y_overlap_end = min(bbox1[1] + bbox1[3], bbox2[1] + bbox2[3])
+                    overlap_width = x_overlap_end - x_overlap_start
+                    overlap_height = y_overlap_end - y_overlap_start
+                    intersection = max(0, overlap_width) * max(0, overlap_height)
+                    area1, area2 = areas[idx], areas[idx_j]  # get areas of both bounding boxes
+                    smaller_area = min(area1, area2)
+                    if intersection > 0.5 * smaller_area:
+                        smaller_bbox_idx = idx if area1 < area2 else idx_j
+                        to_remove.add(smaller_bbox_idx)
+            final_bboxes = np.delete(bboxes, list(to_remove), axis=0).tolist()
+            final_scores = np.delete(new_scores, list(to_remove)).tolist()
+            final_labels = np.delete(new_labels, list(to_remove)).tolist()
+            return final_bboxes, final_labels, final_scores
+
         n_bugs = []
         for idx, frame_name in tqdm(enumerate(frame_names), total=len(frame_names)):
             # print(f'{idx + 1} out of {len(frame_names) + 1}')
             image = imread_rgb(os.path.join(folder_path, frame_name))
             result = detect_bug(image)
-            prediction_labels = np.array([result.to_coco_annotations()[idx]['category_id'] for idx, _ in enumerate(result.to_coco_annotations())])
+            prediction_labels = np.array([result.to_coco_annotations()[idx]['category_name'] for idx, _ in enumerate(result.to_coco_annotations())])
             prediction_scores = np.array([result.to_coco_annotations()[idx]['score'] for idx, _ in enumerate(result.to_coco_annotations())])
             prediction_bboxes = np.array([result.to_coco_annotations()[idx]['bbox'] for idx, _ in enumerate(result.to_coco_annotations())])
+            valid_labels, valid_bboxes, valid_scores = [], [], []
             n_bumblebees, n_flies, n_honeybees, n_hoverfly_a, n_hoverfly_b, n_wildbees = 0, 0, 0, 0, 0, 0
-            for bug_idx, bug in enumerate(Bug):
+            for bug in Bug:
                 threshold = getattr(self, f"{bug.class_name.lower()}_threshold")
-                indices = np.where((prediction_labels == bug_idx) & (prediction_scores > threshold))[0]
+                indices = np.where((prediction_labels == bug.class_name) & (prediction_scores > threshold))[0]  # filter bbox based class-specific threshold
                 if len(indices) > 0:
-                    if bug.class_name == 'Bumblebees':
-                        n_bumblebees += len(indices)
-                    elif bug.class_name == 'Flies':
-                        n_flies += len(indices)
-                    elif bug.class_name == 'Honeybees':
-                        n_honeybees += len(indices)
-                    elif bug.class_name == 'Hoverfly_A':
-                        n_hoverfly_a += len(indices)
-                    elif bug.class_name == 'Hoverfly_B':
-                        n_hoverfly_b += len(indices)
-                    elif bug.class_name == 'Wildbees':
-                        n_wildbees += len(indices)
-                    bboxes = [prediction_bboxes[ind] for ind in indices]
-                    bboxes = [np.array(bbox, dtype=np.int32) for bbox in bboxes]
-                    locations = [(x_1, y_1, x_1 + width, y_1 + height) for x_1, y_1, width, height in bboxes]
-                    scores = [prediction_scores[ind] for ind in indices]
-                    for idx, location in enumerate(locations):
-                        x_1, y_1, x_2, y_2 = location
-                        cv2.rectangle(image, (x_1, y_1), (x_2, y_2), bug.mask_rgb, 4)
-                        cv2.putText(image, f'{bug.class_name}, p={round(scores[idx], 2)}', (x_1, y_1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, bug.mask_rgb, 2)
-            cv2.imwrite(os.path.join(output_dir, frame_name), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))  # export the image
+                    valid_labels.append([prediction_labels[ind] for ind in indices][0])
+                    valid_bboxes.append([prediction_bboxes[ind] for ind in indices][0])   # all bboxes (>threshold) for a given bug class
+                    valid_scores.append([prediction_scores[ind] for ind in indices][0])
+            if len(valid_bboxes) >= 2:
+                valid_bboxes, valid_labels, valid_scores = bboxes_postprocess(valid_bboxes, valid_labels, valid_scores)
+            valid_bboxes = [np.array(bbox, dtype=np.int32) for bbox in valid_bboxes]
+            locations = [(x_1, y_1, x_1 + width, y_1 + height) for x_1, y_1, width, height in valid_bboxes]
+            for idx, label in enumerate(valid_labels):
+                if label == 'Bumblebees':
+                    n_bumblebees += 1
+                elif label == 'Flies':
+                    n_flies += 1
+                elif label == 'Honeybees':
+                    n_honeybees += 1
+                elif label == 'Hoverfly_A':
+                    n_hoverfly_a += 1
+                elif label == 'Hoverfly_B':
+                    n_hoverfly_b += 1
+                elif label == 'Wildbees':
+                    n_wildbees += 1
+                x_1, y_1, x_2, y_2 = locations[idx]
+                cv2.rectangle(image, (x_1, y_1), (x_2, y_2), bug_color.get(label), 4)
+                cv2.putText(image, f'{label}, p={round(valid_scores[idx], 2)}', (x_1, y_1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, bug_color.get(label), 2)
             n_bugs.append([n_bumblebees, n_flies, n_honeybees, n_hoverfly_a, n_hoverfly_b, n_wildbees])
+            cv2.imwrite(os.path.join(output_dir, frame_name), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))  # export the image
         return np.array(n_bugs).T.tolist(), frame_names
 
     def count_visits(self, frames, absence_window=2):
@@ -205,7 +244,7 @@ class VisitingEvents():
         # check for events that are still ongoing at the end of the frame list
         for start_n, start_frame, end_frame in ongoing_events:
             if end_frame >= len(frames):
-                completed_events.append((start_frame, "ongoing"))
+                completed_events.append((start_frame, -1))
         return completed_events
 
     def counts2excel(self, folder_path, absence_window_range):
@@ -246,7 +285,7 @@ class VisitingEvents():
     def batch_predict(self, absence_window_range=None):
         """Batch predit for all video frames (subfolders) under a given parent folder"""
         if absence_window_range is None:
-            absence_window_range = [2]
+            absence_window_range = [2, 3, 4]
         folder_names = [name for name in os.listdir(self.input_dir) if not any(name.lower().endswith(file_type) for file_type in video_types + ['predictions'])]
         folder_dirs = [os.path.join(self.input_dir, folder_name) for folder_name in folder_names]
         for folder_dir in tqdm(folder_dirs, total=len(folder_dirs)):
