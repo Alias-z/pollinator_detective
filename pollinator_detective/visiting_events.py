@@ -19,12 +19,13 @@ class SegColors:
         self.class_encoding = class_encoding
 
 
-Bug = [SegColors('Bumblebees', [100, 0, 0], 0),
-       SegColors('Flies', [100, 67, 0], 1),
-       SegColors('Honeybees', [100, 100, 0], 2),
-       SegColors('Hoverfly_A', [33, 0, 50], 3),
-       SegColors('Hoverfly_B', [100, 0, 50], 4),
-       SegColors('Wildbees', [33, 100, 100], 5)]
+Bug = [SegColors('Bumblebees', [255, 0, 0], 0),
+       SegColors('Flies', [0, 0, 255], 1),
+       SegColors('Honeybees', [255, 165, 0], 2),
+       SegColors('Hoverfly_A', [165, 42, 42], 3),
+       SegColors('Hoverfly_B', [64, 224, 208], 4),
+       SegColors('Wildbees', [255, 0, 255], 5),
+       SegColors('Others', [255, 223, 0], 6)]
 
 bug_color = {bug.class_name: bug.mask_rgb for bug in Bug}
 
@@ -45,6 +46,7 @@ class VisitingEvents():
                  hoverfly_a_threshold: float = 0.9,
                  hoverfly_b_threshold: float = 0.9,
                  wildbees_threshold: float = 0.9,
+                 others_threshold: float = 0.9,
                  ):
         self.input_dir = os.path.normpath(input_dir)  # input directory
         self.detector_config_path = detector_config_path  # object detection config path
@@ -59,6 +61,7 @@ class VisitingEvents():
         self.hoverfly_a_threshold = hoverfly_a_threshold  # object detection threshold for hoverfly_a
         self.hoverfly_b_threshold = hoverfly_b_threshold  # object detection threshold for hoverfly_b
         self.wildbees_threshold = wildbees_threshold  # object detection threshold for wildbees
+        self.others_threshold = others_threshold  # object detection threshold for other bugs
 
     def get_video_paths(self):
         """Get the paths of videos under a given folder"""
@@ -97,10 +100,11 @@ class VisitingEvents():
 
     def bug_detector(self, folder_path):
         """Detect pollinators for all frames under a given folder"""
-        output_dir = os.path.join(os.path.split(folder_path)[0], f'{os.path.split(folder_path)[1]} predictions')
+        output_dir = os.path.join(os.path.split(folder_path)[0],
+                                  f'{os.path.split(folder_path)[1]} predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold}')
         os.makedirs(output_dir, exist_ok=True)
         frame_names = [name for name in os.listdir(folder_path) if any(name.lower().endswith(file_type) for file_type in image_types)]
-        mmdet_utils_register_all_modules(init_default_scope=False)  # initialize mmdet scope
+        mmdet_utils_register_all_modules(init_default_scope=True)  # initialize mmdet scope
         detector = AutoDetectionModel.from_pretrained(model_type='mmdet',
                                                       model_path=self.detector_weight_path,
                                                       config_path=self.detector_config_path,
@@ -286,7 +290,7 @@ class VisitingEvents():
         """Batch predit for all video frames (subfolders) under a given parent folder"""
         if absence_window_range is None:
             absence_window_range = [2, 3, 4]
-        folder_names = [name for name in os.listdir(self.input_dir) if not any(name.lower().endswith(file_type) for file_type in video_types + ['predictions'])]
+        folder_names = [name for name in os.listdir(self.input_dir) if not any(file_type in name.lower() for file_type in video_types + ['predictions', 'xlsx'])]
         folder_dirs = [os.path.join(self.input_dir, folder_name) for folder_name in folder_names]
         for folder_dir in tqdm(folder_dirs, total=len(folder_dirs)):
             self.counts2excel(folder_dir, absence_window_range=absence_window_range)
