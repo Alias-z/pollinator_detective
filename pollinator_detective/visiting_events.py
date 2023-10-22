@@ -5,6 +5,7 @@ import cv2  # OpenCV
 import numpy as np  # NumPy
 import pandas as pd  # for Excel sheet
 from tqdm import tqdm
+import pytesseract; pytesseract.pytesseract.tesseract_cmd = 'C://Programs//Tesseract-OCR//tesseract.exe'   # noqa: for OCR
 from mmdet.utils import register_all_modules as mmdet_utils_register_all_modules  # register mmdet modules
 from sahi import AutoDetectionModel  # loads a DetectionModel from given path
 from sahi.predict import get_sliced_prediction  # detect bugs from frame slices
@@ -65,38 +66,66 @@ class VisitingEvents():
 
     def get_video_paths(self):
         """Get the paths of videos under a given folder"""
-        file_names = sorted(os.listdir(self.input_dir), key=str.casefold)
-        file_names = [name for name in file_names if any(name.lower().endswith(file_type) for file_type in video_types)]
-        file_paths = [os.path.join(self.input_dir, file_name) for file_name in file_names]
+        file_names = sorted(os.listdir(self.input_dir), key=str.casefold)  # list of all files under the input directory
+        file_names = [name for name in file_names if any(name.lower().endswith(file_type) for file_type in video_types)]  # select only video files
+        file_paths = [os.path.join(self.input_dir, file_name) for file_name in file_names]  # get the paths of these video files
         return file_paths
 
-    def extract_frames(self, video_path, frame_rate=30):
-        """Extract all frames from a video"""
-        video_name, _ = os.path.splitext(video_path)
-        os.makedirs(video_name, exist_ok=True)
-        video = cv2.VideoCapture(video_path)
-        filename = os.path.splitext(os.path.basename(video_path))[0]
-        frame_duration = 1000 // frame_rate  # The time between frames in milliseconds
-        milliseconds, frame, frame_paths = 0, 1, []
+    def extract_frames(self, video_path):
+        """Extract all frames from a video and initiate CSRT tracker"""
+        output_dir, _ = os.path.splitext(video_path)  # get the video path excluding the file extension
+        os.makedirs(output_dir, exist_ok=True)  # make output folder for store video frames
+        filename = os.path.splitext(os.path.basename(video_path))[0]  # get the video name exlcuding the file extension
+        video = cv2.VideoCapture(video_path)  # load the video
+        params = cv2.TrackerCSRT_Params()
+        params.padding = 5.0  # increase padding to consider more context
+        params.gsl_sigma = 1.5  # increase GSL sigma for a smoother spatial reliability map
+        params.hog_orientations = 9  # number of HOG orientations
+        params.num_hog_channels_used = 18  # use more HOG channels
+        params.hog_clip = 2.5  # clip HOG values to prevent large gradients from dominating
+        params.filter_lr = 0.005  # decrease the learning rate for the filter for more stability
+        params.weights_lr = 0.005  # decrease the learning rate for the weights for more stability
+        params.background_ratio = 2  # background ratio
+        params.psr_threshold = 0.035  # PSR (Peak-to-Sidelobe Ratio) threshold to detect lost object
+        params.histogram_bins = 16  # the number of bins in the histogram
+        params.histogram_lr = 0.04  # learning rate for the histogram
+        tracker, tracker_initialized = cv2.TrackerCSRT_create(), False  # create a CSRT tracker
+        roi_locations, n_frame = [], 1  # roi in the form of x, y, w, h
         while True:
-            frame_number = int((video.get(cv2.CAP_PROP_FPS) / 1000) * milliseconds)
-            video.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            success, image = video.read()
-            if success:
-                frame_path = os.path.join(video_name, f"{filename} frame{frame:04d}.png")
-                frame_paths.append(frame_path)
-                cv2.imwrite(frame_path, image)
-                milliseconds += frame_duration
-                frame += 1
-            else:
+            success, frame = video.read()  # read each video frame
+            if not success:
                 break
-        return video_name
+            ocr_region = frame[980:1080, 700:1200]  # crop to OCR region
+            text = pytesseract.image_to_string(cv2.cvtColor(ocr_region, cv2.COLOR_BGR2GRAY))  # get the OCR result
+            lines = text.split('\n')  # separate text by spaces
+            text = next((line for line in lines if 'TLC' in line), 'No match found').replace('/', '.').replace(':', '.')  # extract text starting with TLC
+            frame_path = os.path.join(output_dir, f"{filename} {text} frame{n_frame:04d}.png")  # define the frame path
+            cv2.imwrite(frame_path, frame)  # save the frame as an image
+            if not tracker_initialized:
+                bbox = cv2.selectROI('Select the flower of interest and hit ENTER', frame, fromCenter=False, showCrosshair=True)  # select ROI
+                bbox_success = bbox  # if any tracking fails, the bbox will be the previous successful one (here initiating)
+                cv2.destroyAllWindows()
+                tracker.init(frame, bbox); tracker_initialized = True  # noqa: initialize the tracker
+            else:
+                success, bbox = tracker.update(frame)  # update tracker
+            if success:
+                bbox_success = bbox  # if any tracking fails, the bbox will be the previous successful one
+            roi_locations.append(bbox_success)  # add the roi location for each video frame
+            (point_x, point_y, width, height) = [int(varible) for varible in bbox_success]
+            cv2.rectangle(frame, (point_x, point_y), (point_x + width, point_y + height), (255, 255, 255), 3)
+            cv2.imshow('Tracking ROI', frame)
+            n_frame += 1  # frame name increment by 1
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        video.release(); cv2.destroyAllWindows()  # noqa: quite video viewing
+        np.save(os.path.join(self.input_dir, f"{filename}.npy"), np.array(roi_locations))  # save ROI list os np.array
+        return output_dir
 
     def batch_extractor(self):
         """Extract frames from all videos"""
         video_paths = self.get_video_paths()
-        video_names = [self.extract_frames(video_path, frame_rate=30) for video_path in video_paths]
-        return video_names
+        output_dirs = [self.extract_frames(video_path) for video_path in video_paths]
+        return output_dirs
 
     def bug_detector(self, folder_path):
         """Detect pollinators for all frames under a given folder"""
@@ -282,7 +311,7 @@ class VisitingEvents():
                       f'{Bug[5].class_name} visits': all_events[5],
                       }
             result = pd.DataFrame(data=result)  # collect results in a pd dataframe for exporting to an Excel sheet
-            excel_filename = f"{folder_path} predictions//Absence Window {absence_window}.xlsx"
+            excel_filename = f"{folder_path} predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold}//Absence Window {absence_window}.xlsx"
             result.to_excel(excel_filename, index=False)
         return None
 
