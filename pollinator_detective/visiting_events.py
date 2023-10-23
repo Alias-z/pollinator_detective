@@ -35,6 +35,7 @@ class VisitingEvents():
     """Counting pollinator visiting events"""
     def __init__(self,
                  input_dir: str,
+                 save_frames: bool = False,
                  detector_config_path: str = None,
                  detector_weight_path: str = None,
                  new_width: int = 1920,
@@ -50,6 +51,7 @@ class VisitingEvents():
                  others_threshold: float = 0.9,
                  ):
         self.input_dir = os.path.normpath(input_dir)  # input directory
+        self.save_frames = save_frames  # wether to save video frame in a separate folder
         self.detector_config_path = detector_config_path  # object detection config path
         self.detector_weight_path = detector_weight_path  # object detection weight path
         self.new_width = new_width  # new width after resizing
@@ -74,7 +76,8 @@ class VisitingEvents():
     def extract_frames(self, video_path):
         """Extract all frames from a video and initiate CSRT tracker"""
         output_dir, _ = os.path.splitext(video_path)  # get the video path excluding the file extension
-        os.makedirs(output_dir, exist_ok=True)  # make output folder for store video frames
+        if self.save_frames:
+            os.makedirs(output_dir, exist_ok=True)  # make output folder for store video frames
         filename = os.path.splitext(os.path.basename(video_path))[0]  # get the video name exlcuding the file extension
         video = cv2.VideoCapture(video_path)  # load the video
         params = cv2.TrackerCSRT_Params()
@@ -90,7 +93,7 @@ class VisitingEvents():
         params.histogram_bins = 16  # the number of bins in the histogram
         params.histogram_lr = 0.04  # learning rate for the histogram
         tracker, tracker_initialized = cv2.TrackerCSRT_create(), False  # create a CSRT tracker
-        roi_locations, n_frame = [], 1  # roi in the form of x, y, w, h
+        roi_locations, n_frame, n_frames, timing = [], 1, [], []  # roi in the form of x, y, w, h
         while True:
             success, frame = video.read()  # read each video frame
             if not success:
@@ -98,9 +101,11 @@ class VisitingEvents():
             ocr_region = frame[980:1080, 700:1200]  # crop to OCR region
             text = pytesseract.image_to_string(cv2.cvtColor(ocr_region, cv2.COLOR_BGR2GRAY))  # get the OCR result
             lines = text.split('\n')  # separate text by spaces
-            text = next((line for line in lines if 'TLC' in line), 'No match found').replace('/', '.').replace(':', '.')  # extract text starting with TLC
-            frame_path = os.path.join(output_dir, f"{filename} {text} frame{n_frame:04d}.png")  # define the frame path
-            cv2.imwrite(frame_path, frame)  # save the frame as an image
+            text = next((line for line in lines if 'TLC' in line), 'No match found')  # extract text starting with TLC
+            timing.append(text)  # append timestamp
+            if self.save_frames:
+                frame_path = os.path.join(output_dir, f"{filename} {text.replace('/', '.').replace(':', '.')} frame{n_frame:04d}.png")  # define the frame path
+                cv2.imwrite(frame_path, frame)  # save the frame as an image
             if not tracker_initialized:
                 bbox = cv2.selectROI('Select the flower of interest and hit ENTER', frame, fromCenter=False, showCrosshair=True)  # select ROI
                 bbox_success = bbox  # if any tracking fails, the bbox will be the previous successful one (here initiating)
@@ -111,21 +116,67 @@ class VisitingEvents():
             if success:
                 bbox_success = bbox  # if any tracking fails, the bbox will be the previous successful one
             roi_locations.append(bbox_success)  # add the roi location for each video frame
-            (point_x, point_y, width, height) = [int(varible) for varible in bbox_success]
-            cv2.rectangle(frame, (point_x, point_y), (point_x + width, point_y + height), (255, 255, 255), 3)
+            (point_x, point_y, width, height) = [int(varible) for varible in bbox_success]  # bbox coordinates
+            cv2.rectangle(frame, (point_x, point_y), (point_x + width, point_y + height), (255, 255, 255), 3)  # draw the bbox
             cv2.imshow('Tracking ROI', frame)
-            n_frame += 1  # frame name increment by 1
+            n_frames.append(n_frame); n_frame += 1  # noqa: frame name increment by 1
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         video.release(); cv2.destroyAllWindows()  # noqa: quite video viewing
         np.save(os.path.join(self.input_dir, f"{filename}.npy"), np.array(roi_locations))  # save ROI list os np.array
+        result = {'frame_names': n_frames,
+                  'time': timing}
+        result = pd.DataFrame(data=result)  # collect results in a pd dataframe for exporting to an Excel sheet
+        excel_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}.xlsx"
+        result.to_excel(os.path.join(output_dir, excel_filename), index=False)
         return output_dir
 
-    def batch_extractor(self):
-        """Extract frames from all videos"""
+    def visualize_tracking(self, video_path):
+        """Load a video and tracker npy file for visualization"""
+        video = cv2.VideoCapture(video_path)  # load the video
+        roi_locations = np.load(f'{os.path.splitext(video_path)[0]}.npy').tolist()   # load the ROI locations
+        frames, paused, current_frame = [], True, 0  # to load all frames, pause at a given frame or move around
+        print('loading video and ROI locations')
+        while True:
+            success, frame = video.read()  # load video frames
+            if not success:
+                break
+            frames.append(frame)  # buffer the frames
+        try:
+            while True:
+                frame = frames[current_frame].copy()  # create a copy of the frame to draw the bbox
+                bbox = roi_locations[current_frame]  # the ROI bbox
+                (point_x, point_y, width, height) = [int(variable) for variable in bbox]  # bbox coordinates
+                cv2.rectangle(frame, (point_x, point_y), (point_x + width, point_y + height), (255, 255, 255), 3)  # draw the bbox
+                cv2.imshow('Tracking ROI', frame)
+                if paused:
+                    key = cv2.waitKey(0) & 0xFF
+                else:
+                    key = cv2.waitKey(25) & 0xFF
+                    current_frame = (current_frame + 1) % len(frames)
+                if key == 27:  # ESC key to quit
+                    break
+                elif key == 32:  # SPACE key to pause or continue
+                    paused = not paused
+                elif key == ord('d') and paused:  # D key to the next frame
+                    current_frame = (current_frame + 1) % len(frames)
+                    paused = True
+                elif key == ord('a') and paused:  # A key to the previous frame
+                    current_frame = (current_frame - 1) % len(frames)
+                    paused = True
+        finally:
+            video.release()
+            cv2.destroyAllWindows()
+
+    def batch4videos(self, mode='E'):
+        """Extract frames from all videos or visualize the tracking"""
         video_paths = self.get_video_paths()
-        output_dirs = [self.extract_frames(video_path) for video_path in video_paths]
-        return output_dirs
+        if mode == 'E':  # extraction mode
+            output_dirs = [self.extract_frames(video_path) for video_path in video_paths]
+            return output_dirs
+        elif mode == 'V':  # visualization mode
+            _ = [self.visualize_tracking(video_path) for video_path in video_paths]
+            return None
 
     def bug_detector(self, folder_path):
         """Detect pollinators for all frames under a given folder"""
