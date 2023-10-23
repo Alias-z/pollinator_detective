@@ -6,10 +6,11 @@ import numpy as np  # NumPy
 import pandas as pd  # for Excel sheet
 from tqdm import tqdm
 import pytesseract; pytesseract.pytesseract.tesseract_cmd = 'C://Programs//Tesseract-OCR//tesseract.exe'   # noqa: for OCR
+from PIL import Image  # Pillow image processing
 from mmdet.utils import register_all_modules as mmdet_utils_register_all_modules  # register mmdet modules
-from sahi import AutoDetectionModel  # loads a DetectionModel from given path
-from sahi.predict import get_sliced_prediction  # detect bugs from frame slices
-from .core import device, image_types, video_types, imread_rgb  # import core functions
+from mmdet.apis import init_detector as mmdet_apis_init_detector  # initialize mmdet model
+from mmdet.apis import inference_detector as mmdet_apis_inference_detector  # mmdet inference detector
+from .core import device, video_types  # import core functions
 
 
 class SegColors:
@@ -28,8 +29,6 @@ Bug = [SegColors('Bumblebees', [255, 0, 0], 0),
        SegColors('Wildbees', [255, 0, 255], 5),
        SegColors('Others', [255, 223, 0], 6)]
 
-bug_color = {bug.class_name: bug.mask_rgb for bug in Bug}
-
 
 class VisitingEvents():
     """Counting pollinator visiting events"""
@@ -40,8 +39,6 @@ class VisitingEvents():
                  detector_weight_path: str = None,
                  new_width: int = 1920,
                  new_height: int = 1080,
-                 sahi_slices: int = 5,
-                 sahi_overlap_ratio: float = 0.7,
                  bumblebees_threshold: float = 0.9,
                  flies_threshold: float = 0.9,
                  honeybees_threshold: float = 0.9,
@@ -56,8 +53,6 @@ class VisitingEvents():
         self.detector_weight_path = detector_weight_path  # object detection weight path
         self.new_width = new_width  # new width after resizing
         self.new_height = new_height  # new height after resizing
-        self.sahi_slices = sahi_slices  # numbder of slice to crop from each direction, total patch will be the sqaured
-        self.sahi_overlap_ratio = sahi_overlap_ratio  # fractional overlap in width of eachslice
         self.bumblebees_threshold = bumblebees_threshold  # object detection threshold for bumblebees
         self.flies_threshold = flies_threshold  # object detection threshold for flies
         self.honeybees_threshold = honeybees_threshold  # object detection threshold for honeybees
@@ -69,11 +64,20 @@ class VisitingEvents():
     def get_video_paths(self):
         """Get the paths of videos under a given folder"""
         file_names = sorted(os.listdir(self.input_dir), key=str.casefold)  # list of all files under the input directory
-        file_names = [name for name in file_names if any(name.lower().endswith(file_type) for file_type in video_types)]  # select only video files
+        file_names = [name for name in file_names if any(name.lower().endswith(file_type) for file_type in video_types) and 'predictions' not in name.lower()]  # select only source video files
         file_paths = [os.path.join(self.input_dir, file_name) for file_name in file_names]  # get the paths of these video files
         return file_paths
 
-    def extract_frames(self, video_path):
+    def select_roi(self, video_path):
+        """Select the ROI for a video tracker"""
+        video = cv2.VideoCapture(video_path)  # load the video
+        success, frame = video.read()  # read each video frame
+        if success:
+            bbox = cv2.selectROI('Select the flower of interest and hit ENTER', frame, fromCenter=False, showCrosshair=True)  # select ROI
+        video.release(); cv2.destroyAllWindows()  # noqa: quite video viewing
+        return bbox
+
+    def extract_frames(self, video_path, roi_bbox):
         """Extract all frames from a video and initiate CSRT tracker"""
         output_dir, _ = os.path.splitext(video_path)  # get the video path excluding the file extension
         if self.save_frames:
@@ -107,9 +111,8 @@ class VisitingEvents():
                 frame_path = os.path.join(output_dir, f"{filename} {text.replace('/', '.').replace(':', '.')} frame{n_frame:04d}.png")  # define the frame path
                 cv2.imwrite(frame_path, frame)  # save the frame as an image
             if not tracker_initialized:
-                bbox = cv2.selectROI('Select the flower of interest and hit ENTER', frame, fromCenter=False, showCrosshair=True)  # select ROI
+                bbox = roi_bbox  # load selected ROI
                 bbox_success = bbox  # if any tracking fails, the bbox will be the previous successful one (here initiating)
-                cv2.destroyAllWindows()
                 tracker.init(frame, bbox); tracker_initialized = True  # noqa: initialize the tracker
             else:
                 success, bbox = tracker.update(frame)  # update tracker
@@ -127,21 +130,29 @@ class VisitingEvents():
         result = {'frame_names': n_frames,
                   'time': timing}
         result = pd.DataFrame(data=result)  # collect results in a pd dataframe for exporting to an Excel sheet
-        excel_filename = f"{os.path.splitext(os.path.basename(video_path))[0]}.xlsx"
-        result.to_excel(os.path.join(output_dir, excel_filename), index=False)
+        excel_filename = f"{os.path.splitext(video_path)[0]}.xlsx"
+        result.to_excel(excel_filename, index=False)
         return output_dir
 
-    def visualize_tracking(self, video_path):
-        """Load a video and tracker npy file for visualization"""
+    def video_buffer(self, video_path):
+        """Preload all video frames into memory"""
         video = cv2.VideoCapture(video_path)  # load the video
-        roi_locations = np.load(f'{os.path.splitext(video_path)[0]}.npy').tolist()   # load the ROI locations
-        frames, paused, current_frame = [], True, 0  # to load all frames, pause at a given frame or move around
-        print('loading video and ROI locations')
+        frames = []  # to store all frames
         while True:
             success, frame = video.read()  # load video frames
             if not success:
                 break
             frames.append(frame)  # buffer the frames
+        video.release()
+        return frames
+
+    def visualize_tracking(self, video_path):
+        """Load a video and tracker npy file for visualization"""
+        frames = self.video_buffer(video_path)  # load the video frames
+        roi_locations = np.load(f'{os.path.splitext(video_path)[0]}.npy').tolist()   # load the ROI locations
+        paused, current_frame = True, 0  # to pause at a given frame or move around
+        print('loading video and ROI locations')
+
         try:
             while True:
                 frame = frames[current_frame].copy()  # create a copy of the frame to draw the bbox
@@ -165,58 +176,46 @@ class VisitingEvents():
                     current_frame = (current_frame - 1) % len(frames)
                     paused = True
         finally:
-            video.release()
             cv2.destroyAllWindows()
 
     def batch4videos(self, mode='E'):
         """Extract frames from all videos or visualize the tracking"""
-        video_paths = self.get_video_paths()
+        video_paths = self.get_video_paths()  # get all video paths
         if mode == 'E':  # extraction mode
-            output_dirs = [self.extract_frames(video_path) for video_path in video_paths]
-            return output_dirs
+            roi_bboxes = [self.select_roi(video_path) for video_path in video_paths]
+            for idx, video_path in enumerate(video_paths):
+                self.extract_frames(video_path, roi_bboxes[idx])
         elif mode == 'V':  # visualization mode
             _ = [self.visualize_tracking(video_path) for video_path in video_paths]
-            return None
+        return None
 
-    def bug_detector(self, folder_path):
+    def frames_to_video(self, frames, output_path, fps=30):
+        """Convert a list of frames (NumPy arrays) to a video file"""
+        height, width, _ = frames[0].shape  # get the dimensions of the first frame
+        fourcc = cv2.VideoWriter_fourcc(*'DIVX')  # 'DIVX' for AVI
+        video = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        for frame in frames:
+            video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))  # write each frame to the video file
+        video.release()  # Release the video writer object
+        return None
+
+    def bug_detector(self, video_path):
         """Detect pollinators for all frames under a given folder"""
-        output_dir = os.path.join(os.path.split(folder_path)[0],
-                                  f'{os.path.split(folder_path)[1]} predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold}')
-        os.makedirs(output_dir, exist_ok=True)
-        frame_names = [name for name in os.listdir(folder_path) if any(name.lower().endswith(file_type) for file_type in image_types)]
-        mmdet_utils_register_all_modules(init_default_scope=True)  # initialize mmdet scope
-        detector = AutoDetectionModel.from_pretrained(model_type='mmdet',
-                                                      model_path=self.detector_weight_path,
-                                                      config_path=self.detector_config_path,
-                                                      confidence_threshold=0.1,
-                                                      image_size=self.new_width,
-                                                      device=device)
+        output_dir = os.path.join(os.path.splitext(video_path)[0],
+                                  f'predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold}')
+        if self.save_frames:
+            os.makedirs(output_dir, exist_ok=True)  # create directory for frames
 
-        def detect_bug(image_path):
-            """Return sliced detection results"""
-            result = get_sliced_prediction(
-                image_path,
-                detector,
-                slice_height=int(self.new_height / self.sahi_slices / self.sahi_overlap_ratio),
-                slice_width=int(self.new_width / self.sahi_slices / self.sahi_overlap_ratio),
-                overlap_height_ratio=1 - self.sahi_overlap_ratio,
-                overlap_width_ratio=1 - self.sahi_overlap_ratio,
-                perform_standard_pred=False,
-                postprocess_type='GREEDYNMM',  # 'NMM', 'GRREDYNMM' or 'NMS'. Default is 'GRREDYNMM'.
-                postprocess_match_metric='IOS',  # 'IOU' for intersection over union, 'IOS' for intersection over smaller area.
-                postprocess_match_threshold=0.6,
-                verbose=0)
-            return result
-
-        def bboxes_postprocess(bboxes, labels, scores):
-            """Remove smaller bounding boxes that overlap with a larger one for MSCOCO format
-            based on the overlap criteria."""
+        def bboxes_postprocess(roi_area, bboxes, labels, scores):
+            """Remove smaller bounding boxes that overlap with a larger one based on the overlap criteria (default 0.5)"""
             bboxes = np.array(bboxes)  # convert list to np.array
             scores = np.array(scores)
             labels = np.array(labels)
             to_remove = set()  # initialize the set of bboxes to be removed
-            areas = bboxes[:, 2] * bboxes[:, 3]  # calculate area for all bounding boxes
-            new_scores = scores.copy()
+            widths = bboxes[:, 2] - bboxes[:, 0]  # calculate the width
+            heights = bboxes[:, 3] - bboxes[:, 1]  # calculate the height
+            areas = widths * heights  # calculate area for all bounding boxes
+            new_scores = scores.copy()  # prevent changing in position
             new_labels = labels.copy()
             for idx, _ in enumerate(bboxes):
                 for idx_j in range(idx + 1, len(bboxes)):
@@ -225,9 +224,9 @@ class VisitingEvents():
                     bbox1 = bboxes[idx]
                     bbox2 = bboxes[idx_j]
                     x_overlap_start = max(bbox1[0], bbox2[0])
-                    x_overlap_end = min(bbox1[0] + bbox1[2], bbox2[0] + bbox2[2])
+                    x_overlap_end = min(bbox1[2], bbox2[2])
                     y_overlap_start = max(bbox1[1], bbox2[1])
-                    y_overlap_end = min(bbox1[1] + bbox1[3], bbox2[1] + bbox2[3])
+                    y_overlap_end = min(bbox1[3], bbox2[3])
                     overlap_width = x_overlap_end - x_overlap_start
                     overlap_height = y_overlap_end - y_overlap_start
                     intersection = max(0, overlap_width) * max(0, overlap_height)
@@ -236,51 +235,72 @@ class VisitingEvents():
                     if intersection > 0.5 * smaller_area:
                         smaller_bbox_idx = idx if area1 < area2 else idx_j
                         to_remove.add(smaller_bbox_idx)
+                    if smaller_area < 0.001 * roi_area:
+                        to_remove.add(smaller_bbox_idx)  # remove every small object
             final_bboxes = np.delete(bboxes, list(to_remove), axis=0).tolist()
             final_scores = np.delete(new_scores, list(to_remove)).tolist()
             final_labels = np.delete(new_labels, list(to_remove)).tolist()
             return final_bboxes, final_labels, final_scores
 
-        n_bugs = []
-        for idx, frame_name in tqdm(enumerate(frame_names), total=len(frame_names)):
-            # print(f'{idx + 1} out of {len(frame_names) + 1}')
-            image = imread_rgb(os.path.join(folder_path, frame_name))
-            result = detect_bug(image)
-            prediction_labels = np.array([result.to_coco_annotations()[idx]['category_name'] for idx, _ in enumerate(result.to_coco_annotations())])
-            prediction_scores = np.array([result.to_coco_annotations()[idx]['score'] for idx, _ in enumerate(result.to_coco_annotations())])
-            prediction_bboxes = np.array([result.to_coco_annotations()[idx]['bbox'] for idx, _ in enumerate(result.to_coco_annotations())])
+        frames = self.video_buffer(video_path)  # load the video frames
+        frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]  # BRG to RGB
+        roi_locations = np.load(f'{os.path.splitext(video_path)[0]}.npy').tolist()   # load the ROI locations
+        roi_patches = []  # list of patches and locations
+        for idx, frame in enumerate(frames):
+            frame = Image.fromarray(frame)  # convert to PIL image
+            point_x, point_y, width, height = roi_locations[idx]  # get the coordinates
+            roi_patch = frame.crop((point_x, point_y, point_x + width, point_y + height))  # crop to ROI
+            roi_patches.append(np.array(roi_patch))  # append np.array format ROI
+        mmdet_utils_register_all_modules(init_default_scope=True)  # initialize mmdet scope
+        detector = mmdet_apis_init_detector(self.detector_config_path, self.detector_weight_path, device=device)  # initialize a object detector from config file
+        results = [mmdet_apis_inference_detector(detector, roi_patch) for roi_patch in roi_patches]  # inference image(s) with the object detector
+        scores = [result.pred_instances.scores.cpu().numpy() for result in results]  # get the predicted scores
+        labels = [result.pred_instances.labels.cpu().numpy() for result in results]  # get the predicted labels
+        labels = [np.array(label, dtype=np.int32) for label in labels]  # convert labels to integers
+        bboxes = [result.pred_instances.bboxes.cpu().numpy() for result in results]  # get the predicted bboxes
+        n_bugs, new_frames = [], []
+        for idx, frame in tqdm(enumerate(frames), total=len(frames)):
+            frame = frame.copy()  # prevent chang in position
             valid_labels, valid_bboxes, valid_scores = [], [], []
             n_bumblebees, n_flies, n_honeybees, n_hoverfly_a, n_hoverfly_b, n_wildbees = 0, 0, 0, 0, 0, 0
             for bug in Bug:
-                threshold = getattr(self, f"{bug.class_name.lower()}_threshold")
-                indices = np.where((prediction_labels == bug.class_name) & (prediction_scores > threshold))[0]  # filter bbox based class-specific threshold
+                threshold = getattr(self, f"{bug.class_name.lower()}_threshold")  # get the threshold for the given bug type
+                indices = np.where((labels[idx] == bug.class_encoding) & (scores[idx] > threshold))[0]  # filter bbox based class-specific threshold
                 if len(indices) > 0:
-                    valid_labels.append([prediction_labels[ind] for ind in indices][0])
-                    valid_bboxes.append([prediction_bboxes[ind] for ind in indices][0])   # all bboxes (>threshold) for a given bug class
-                    valid_scores.append([prediction_scores[ind] for ind in indices][0])
-            if len(valid_bboxes) >= 2:
-                valid_bboxes, valid_labels, valid_scores = bboxes_postprocess(valid_bboxes, valid_labels, valid_scores)
+                    valid_labels.append([labels[idx][ind] for ind in indices][0])
+                    valid_bboxes.append([bboxes[idx][ind] for ind in indices][0])   # all bboxes (>threshold) for a given bug class
+                    valid_scores.append([scores[idx][ind] for ind in indices][0])
+                if len(valid_bboxes) >= 2:
+                    roi_area = roi_locations[idx].shape[0] * roi_locations[idx].shape[1]  # get the ROI area
+                    valid_bboxes, valid_labels, valid_scores = bboxes_postprocess(roi_area, valid_bboxes, valid_labels, valid_scores)
             valid_bboxes = [np.array(bbox, dtype=np.int32) for bbox in valid_bboxes]
-            locations = [(x_1, y_1, x_1 + width, y_1 + height) for x_1, y_1, width, height in valid_bboxes]
-            for idx, label in enumerate(valid_labels):
-                if label == 'Bumblebees':
+            point_x, point_y, width, height = roi_locations[idx]  # ROI location in MSCOCO format
+            ox_1, oy_1, ox_2, oy_2 = point_x, point_y, point_x + width, point_y + height  # convet MSCOCO format to mmdet format
+            cv2.rectangle(frame, (ox_1, oy_1), (ox_2, oy_2), (255, 255, 255), 3)  # draw the ROI in white
+            for idx_2, label in enumerate(valid_labels):
+                bug_type = Bug[label].class_name
+                if bug_type == 'Bumblebees':
                     n_bumblebees += 1
-                elif label == 'Flies':
+                elif bug_type == 'Flies':
                     n_flies += 1
-                elif label == 'Honeybees':
+                elif bug_type == 'Honeybees':
                     n_honeybees += 1
-                elif label == 'Hoverfly_A':
+                elif bug_type == 'Hoverfly_A':
                     n_hoverfly_a += 1
-                elif label == 'Hoverfly_B':
+                elif bug_type == 'Hoverfly_B':
                     n_hoverfly_b += 1
-                elif label == 'Wildbees':
+                elif bug_type == 'Wildbees':
                     n_wildbees += 1
-                x_1, y_1, x_2, y_2 = locations[idx]
-                cv2.rectangle(image, (x_1, y_1), (x_2, y_2), bug_color.get(label), 4)
-                cv2.putText(image, f'{label}, p={round(valid_scores[idx], 2)}', (x_1, y_1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, bug_color.get(label), 2)
+                x_1, y_1, x_2, y_2 = valid_bboxes[idx_2]  # bug bbox in mmdet format
+                x_1 += ox_1; y_1 += oy_1; x_2 += ox_1; y_2 += oy_1  # noqa: map bboxes back to the image
+                cv2.rectangle(frame, (x_1, y_1), (x_2, y_2), Bug[label].mask_rgb, 3)  # draw the bug bboxes
+                cv2.putText(frame, f'{bug_type}, p={round(float(valid_scores[idx_2]), 2)}', (x_1, y_1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, Bug[label].mask_rgb, 2)  # draw the bug types and scores
+            if self.save_frames:
+                cv2.imwrite(os.path.join(output_dir, f'frame {idx+1}.png'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))  # export the frames as images
+            new_frames.append(frame)  # collect frams with bboxes
             n_bugs.append([n_bumblebees, n_flies, n_honeybees, n_hoverfly_a, n_hoverfly_b, n_wildbees])
-            cv2.imwrite(os.path.join(output_dir, frame_name), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))  # export the image
-        return np.array(n_bugs).T.tolist(), frame_names
+        self.frames_to_video(new_frames, f'{output_dir}.AVI')
+        return np.array(n_bugs).T.tolist()
 
     def count_visits(self, frames, absence_window=2):
         """
@@ -331,12 +351,11 @@ class VisitingEvents():
                 completed_events.append((start_frame, -1))
         return completed_events
 
-    def counts2excel(self, folder_path, absence_window_range):
+    def counts2excel(self, video_path, absence_window_range):
         """Count visiting events for all pollinator types and output to an Excel file"""
         if absence_window_range is None:
             absence_window_range = [2]
-        counts, frame_names = self.bug_detector(folder_path)
-        frame_numbers = [number + 1 for number, _ in enumerate(frame_names)]
+        counts = self.bug_detector(video_path)
         for absence_window in absence_window_range:
             all_events = []  # to collect all events
             for count in counts:
@@ -346,9 +365,7 @@ class VisitingEvents():
                     for index_j in range(start, end + 1):  # +1 to include the end index
                         events[index_j] = f"Visits {index_i}"
                 all_events.append(events)
-            result = {'frame_names': frame_names,
-                      'frame_numbers': frame_numbers,
-                      f'{Bug[0].class_name} counts': counts[0],
+            result = {f'{Bug[0].class_name} counts': counts[0],
                       f'{Bug[0].class_name} visits': all_events[0],
                       f'{Bug[1].class_name} counts': counts[1],
                       f'{Bug[1].class_name} visits': all_events[1],
@@ -362,16 +379,17 @@ class VisitingEvents():
                       f'{Bug[5].class_name} visits': all_events[5],
                       }
             result = pd.DataFrame(data=result)  # collect results in a pd dataframe for exporting to an Excel sheet
-            excel_filename = f"{folder_path} predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold}//Absence Window {absence_window}.xlsx"
+            result_ocr = pd.read_excel(f'{os.path.splitext(video_path)[0]}.xlsx')
+            result = pd.concat([result_ocr, result], axis=1)
+            excel_filename = f'{os.path.splitext(video_path)[0]} predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold} Absence Window {absence_window}.xlsx'
             result.to_excel(excel_filename, index=False)
         return None
 
     def batch_predict(self, absence_window_range=None):
         """Batch predit for all video frames (subfolders) under a given parent folder"""
         if absence_window_range is None:
-            absence_window_range = [2, 3, 4]
-        folder_names = [name for name in os.listdir(self.input_dir) if not any(file_type in name.lower() for file_type in video_types + ['predictions', 'xlsx'])]
-        folder_dirs = [os.path.join(self.input_dir, folder_name) for folder_name in folder_names]
-        for folder_dir in tqdm(folder_dirs, total=len(folder_dirs)):
-            self.counts2excel(folder_dir, absence_window_range=absence_window_range)
+            absence_window_range = [2]
+        video_paths = self.get_video_paths()
+        for video_path in tqdm(video_paths, total=len(video_paths)):
+            self.counts2excel(video_path, absence_window_range=absence_window_range)
         return None
