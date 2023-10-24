@@ -63,9 +63,13 @@ class Data4Training:
                 adjusted_bbox = [
                     max(obj['bbox'][0] - crop_x1, 0),
                     max(obj['bbox'][1] - crop_y1, 0),
-                    min(obj['bbox'][2] - crop_x1, self.crop_size[0]),
-                    min(obj['bbox'][3] - crop_y1, self.crop_size[1])
+                    min(obj['bbox'][2] - crop_x1, crop_x2 - crop_x1),
+                    min(obj['bbox'][3] - crop_y1, crop_y2 - crop_y1)
                 ]
+                adjusted_bbox[0] = max(0, min(adjusted_bbox[0], cropped_image.shape[1]))
+                adjusted_bbox[1] = max(0, min(adjusted_bbox[1], cropped_image.shape[0]))
+                adjusted_bbox[2] = max(0, min(adjusted_bbox[2], cropped_image.shape[1]))
+                adjusted_bbox[3] = max(0, min(adjusted_bbox[3], cropped_image.shape[0]))
                 if adjusted_bbox[2] > adjusted_bbox[0] and adjusted_bbox[3] > adjusted_bbox[1]:
                     adjusted_segmentation = []
                     for point in obj['segmentation']:
@@ -114,7 +118,7 @@ class Data4Training:
         self.ensemble_files(input_copy_dir)  # create a copy
         if if_resize_isat:
             resize_isat(input_copy_dir, new_width=self.new_width, new_height=self.new_height)  # resize images and annotations
-        output_name = 'Bug_mmdet'  # for object detection
+        output_name = 'Bug_data'  # for object detection
         output_dir = os.path.join(os.path.split(input_copy_dir)[0], output_name)  # COCO json output dir
         train_dir = os.path.join(output_dir, 'train')  # COCO json train dir
         val_dir = os.path.join(output_dir, 'val')  # COCO json val dir
