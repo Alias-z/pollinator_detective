@@ -185,8 +185,3 @@ def to_coco(input_dir, output_dir):
         json.dump(coco_anno, file)
     return None
 
-
-def ocr_regions(image):
-    """crop the image to the OCR region"""
-    cropped_region = image[1050:1080, 700:1200]
-    return cropped_region
