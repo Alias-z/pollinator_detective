@@ -6,8 +6,6 @@ import shutil  # for copying files
 import json  # manipulate json files
 from PIL import Image  # Pillow image library
 from tqdm import tqdm  # progress bar
-from sahi.slicing import slice_coco  # slice COCO fortmat json files  https://github.com/obss/sahi/blob/main/sahi/slicing.py
-from sahi.utils.file import load_json  # load COCO format json files
 from .core import image_types, resize_isat, data_split, to_coco  # core functions
 
 
@@ -18,16 +16,12 @@ class Data4Training:
                  new_width: int = 1920,
                  new_height: int = 1080,
                  crop_ratio: float = 0.8,
-                 r_train: float = 0.8,
-                 sahi_slices: int = 5,
-                 sahi_overlap_ratio: float = 0.7):
+                 r_train: float = 0.8):
         self.input_dir = input_dir  # input directory
         self.new_width = new_width  # new width after resizing
         self.new_height = new_height  # new height after resizing
         self.crop_ratio = crop_ratio  # center crop ratio
         self.r_train = r_train  # ratio of training data
-        self.sahi_slices = sahi_slices  # numbder of slice to crop from each direction, total patch will be the sqaured
-        self.sahi_overlap_ratio = sahi_overlap_ratio  # fractional overlap in width of eachslice
 
     def ensemble_files(self, output_dir):
         """Ensemble all images and json files"""
@@ -97,7 +91,7 @@ class Data4Training:
         with open(json_path, 'w', encoding='utf-8') as file:
             json.dump(annotation_data, file)
 
-    def data4training(self, if_resize_isat=False, if_center_crop=False, sahi_mode=True):
+    def data4training(self, if_resize_isat=False, if_center_crop=False):
         """generate data for training stomata instance segmentation from ISAT json files"""
         input_copy_dir = self.input_dir + ' - Copy'  # folder copy dir
         self.ensemble_files(input_copy_dir)  # create a copy
@@ -119,25 +113,4 @@ class Data4Training:
         to_coco(train_dir, output_dir=os.path.join(train_dir, 'COCO.json'))  # convert train ISAT json files to COCO
         to_coco(val_dir, output_dir=os.path.join(val_dir, 'COCO.json'))  # same for val
         shutil.rmtree(input_copy_dir)
-        if sahi_mode:
-            for folder in ['train', 'val']:
-                slice_coco(
-                    coco_annotation_file_path=train_dir.replace('train', folder) + '//COCO.json',
-                    image_dir=train_dir.replace('train', folder),
-                    output_coco_annotation_file_name="sliced",
-                    ignore_negative_samples=True,
-                    output_dir=train_dir.replace('train', folder).replace(folder, folder + '_sliced'),
-                    slice_height=int(self.new_height / self.sahi_slices / self.sahi_overlap_ratio),
-                    slice_width=int(self.new_width / self.sahi_slices / self.sahi_overlap_ratio),
-                    overlap_height_ratio=1 - self.sahi_overlap_ratio,
-                    overlap_width_ratio=1 - self.sahi_overlap_ratio,
-                    min_area_ratio=0.1,
-                    verbose=False)
-                coco_dict = load_json(train_dir.replace('train', folder).replace(folder, folder + '_sliced') + '//sliced_coco.json')
-                good_path_names = [coco_dict["images"][idx]['file_name'] for idx, _ in enumerate(coco_dict["images"])]
-                images_dir = train_dir.replace('train', folder).replace('train', folder + '_sliced')
-                all_file_names = [name for name in os.listdir(images_dir) if any(name.lower().endswith(file_type) for file_type in image_types)]
-                for name in all_file_names:
-                    if name not in good_path_names:
-                        os.remove(os.path.join(images_dir, name))
         return None
