@@ -203,8 +203,7 @@ class VisitingEvents():
         """Detect pollinators for all frames under a given folder"""
         output_dir = os.path.join(os.path.splitext(video_path)[0],
                                   f'predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold}')
-        if self.save_frames:
-            os.makedirs(output_dir, exist_ok=True)  # create directory for frames
+        os.makedirs(output_dir, exist_ok=True)  # create directory for frames
 
         def bboxes_postprocess(roi_area, bboxes, labels, scores):
             """Remove smaller bounding boxes that overlap with a larger one based on the overlap criteria (default 0.5)"""
@@ -381,7 +380,7 @@ class VisitingEvents():
             result = pd.DataFrame(data=result)  # collect results in a pd dataframe for exporting to an Excel sheet
             result_ocr = pd.read_excel(f'{os.path.splitext(video_path)[0]}.xlsx')
             result = pd.concat([result_ocr, result], axis=1)
-            excel_filename = f'{os.path.splitext(video_path)[0]} predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold} Absence Window {absence_window}.xlsx'
+            excel_filename = os.path.join(os.path.splitext(video_path)[0], f'predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold} Absence Window {absence_window}.xlsx')
             result.to_excel(excel_filename, index=False)
         return None
 

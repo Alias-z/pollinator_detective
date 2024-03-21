@@ -11,12 +11,12 @@ from .core import image_types, resize_isat, data_split, to_coco  # core function
 
 
 class Data4Training:
-    """Prapre training data for stomata"""
+    """Prapre training data for pollinator detection"""
     def __init__(self,
                  input_dir: str,
                  new_width: int = 1920,
                  new_height: int = 1080,
-                 crop_size: tuple = (512, 512),
+                 crop_size: tuple = (640, 640),
                  r_train: float = 0.8):
         self.input_dir = input_dir  # input directory
         self.new_width = new_width  # new width after resizing
@@ -24,7 +24,7 @@ class Data4Training:
         self.r_train = r_train  # ratio of training data
         self.crop_size = crop_size  # cropping size around objects for images and json files
 
-    def ensemble_files(self, output_dir):
+    def ensemble_files(self, output_dir: str) -> None:
         """Ensemble all images and json files"""
         os.makedirs(output_dir, exist_ok=True)  # create output directory
         subfolders = os.listdir(self.input_dir)  # list all subfolders
@@ -37,17 +37,17 @@ class Data4Training:
                 shutil.copy2(file_path, output_path)  # copy file for ensembling
         return None
 
-    def batch_crop(self, folder_path):
-        """batch crop images and json files to around the objects"""
+    def batch_crop(self, folder_path: str) -> None:
+        """Batch crop images and json files to around the objects"""
 
-        def load_image_isat(image_path, json_path):
+        def load_image_isat(image_path: str, json_path: str) -> tuple:
             """Load images and their ISAT jsons"""
             image = Image.open(image_path)  # load the image
             with open(json_path, encoding='utf-8') as file:
                 annotations = json.load(file)  # load and parse the JSON file
             return np.array(image), annotations
 
-        def crop_image_isat(image_np, annotations, object_index):
+        def crop_image_isat(image_np: np.ndarray, annotations: dict, object_index: int) -> tuple:
             """Crop images and their jsons from the center object bboxes"""
             obj = annotations['objects'][object_index]  # use obj as object to differentiate from the built-in one
             bbox = obj['bbox']  # get the bbox
@@ -82,7 +82,7 @@ class Data4Training:
                     adjusted_annotations['objects'].append(adjusted_obj)
             return cropped_image, adjusted_annotations
 
-        def save_images_isat(image_np, annotations, object_index, base_filename, output_folder):
+        def save_images_isat(image_np: np.ndarray, annotations: dict, object_index: int, base_filename: str, output_folder: str) -> tuple:
             """Save the cropped images and ISAT json files"""
             os.makedirs(output_folder, exist_ok=True)  # make the output directory
             image_filename = f'{base_filename[0]}_object_{object_index}{base_filename[1]}'  # get image filename and extension
@@ -93,7 +93,7 @@ class Data4Training:
                 json.dump(annotations, file)  # save the new json file
             return image_filename, annotations_filename
 
-        def crop_save(image_path, json_path, output_folder):
+        def crop_save(image_path: str, json_path: str, output_folder: str) -> None:
             """Batch crop images based their ISAT json files"""
             image_np, annotations = load_image_isat(image_path, json_path)  # load images and json files
             base_filename = os.path.splitext(os.path.basename(image_path))  # get the image name and extension
@@ -110,21 +110,31 @@ class Data4Training:
             image_path = os.path.join(folder_path, image_file)
             json_path = os.path.join(folder_path, json_files[idx])
             crop_save(image_path, json_path, folder_path)
+        print('note that after cropping, the number of images increase if multiple objects in one image')
         return None
 
-    def data4training(self, if_resize_isat=False):
-        """generate data for training stomata instance segmentation from ISAT json files"""
-        input_copy_dir = self.input_dir + ' - Copy'  # folder copy dir
-        self.ensemble_files(input_copy_dir)  # create a copy
+    def ensemle_crop(self, if_resize_isat: bool = False) -> None:
+        """Ensemle files and crop images and annoations around the detection objects"""
+        output_dir = os.path.join(os.path.dirname(self.input_dir), 'Bug_data')  # output directory
+        self.ensemble_files(output_dir)  # ensemble files to the output folder
         if if_resize_isat:
-            resize_isat(input_copy_dir, new_width=self.new_width, new_height=self.new_height)  # resize images and annotations
-        output_name = 'Bug_data'  # for object detection
-        output_dir = os.path.join(os.path.split(input_copy_dir)[0], output_name)  # COCO json output dir
+            resize_isat(output_dir, new_width=self.new_width, new_height=self.new_height)  # resize images and annotations
+        self.batch_crop(output_dir)  # crop all images in the ensembled directory
+        return None
+
+    def data4training(self, sampled_image_paths: list) -> None:
+        """Generate training data after sampled from each cluster"""
+        sampled_image_paths = [os.path.normpath(path) for path in sampled_image_paths]  # normalize image paths
+        sampled_json_paths = [os.path.splitext(path)[0] + '.json' for path in sampled_image_paths]  # normalized json paths
+        output_dir = os.path.join(os.path.dirname(self.input_dir), 'Bug_data')  # output directory
+        for file_name in set(os.listdir(output_dir)):
+            file_path = os.path.normpath(os.path.join(output_dir, file_name))  # get the file path
+            if file_path not in set(sampled_image_paths) and file_path not in set(sampled_json_paths):
+                os.remove(file_path)  # only keep the selected files
         train_dir = os.path.join(output_dir, 'train')  # COCO json train dir
         val_dir = os.path.join(output_dir, 'val')  # COCO json val dir
-        data_split(input_copy_dir, output_dir, r_train=self.r_train)  # split train and val
-        self.batch_crop(train_dir); self.batch_crop(val_dir)  # noqa: crop train and val
+        data_split(output_dir, output_dir, r_train=self.r_train)  # split train and val
         to_coco(train_dir, output_dir=os.path.join(train_dir, 'COCO.json'))  # convert train ISAT json files to COCO
         to_coco(val_dir, output_dir=os.path.join(val_dir, 'COCO.json'))  # same for val
-        shutil.rmtree(input_copy_dir)
+        _ = [os.remove(path) for path in sampled_image_paths + sampled_json_paths]  # remove the copied files
         return None

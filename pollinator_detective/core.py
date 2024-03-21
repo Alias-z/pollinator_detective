@@ -14,20 +14,20 @@ image_types = ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif', '.ico',
 video_types = ['.avi', '.mp4']  # supported video types
 
 
-def imread_rgb(image_dir: str):
+def imread_rgb(image_dir: str) -> np.array:
     """cv2.imread + BRG2RGB """
     image = cv2.cvtColor(cv2.imread(image_dir), cv2.COLOR_BGR2RGB)
     return image
 
 
-def get_json_paths(json_dir):
-    """under a given folder, get all json files paths"""
+def get_json_paths(json_dir: str) -> list:
+    """Under a given folder, get all json files paths"""
     return glob.glob(os.path.join(json_dir, '*.json'))
 
 
-def resize_isat(input_dir, new_width=1280, new_height=960):
-    """resize ISAT json files and images in a given folder"""
-    json_paths = get_json_paths(input_dir)
+def resize_isat(input_dir: str, new_width: int = 1280, new_height: int = 960) -> None:
+    """Resize ISAT json files and images in a given folder"""
+    json_paths = get_json_paths(input_dir)  # get the paths of all json files
     for json_path in json_paths:
         with open(json_path, 'r', encoding='utf-8') as file:
             data = json.load(file)  # load the json data
@@ -56,8 +56,8 @@ def resize_isat(input_dir, new_width=1280, new_height=960):
     return None
 
 
-def data_split(images_dir, output_dir, r_train=0.8):
-    """split dataset into train and val with defined ratio"""
+def data_split(images_dir: str, output_dir: str, r_train: float = 0.8) -> None:
+    """Split dataset into train and val with defined ratio"""
     random.seed(42); np.random.seed(42)  # noqa: set seed
     file_names = sorted(os.listdir(images_dir), key=str.casefold)
     file_names = [name for name in file_names if any(name.endswith(file_type) for file_type in image_types)]  # image files only
@@ -89,11 +89,11 @@ def data_split(images_dir, output_dir, r_train=0.8):
     return None
 
 
-def to_coco(input_dir, output_dir):
+def to_coco(input_dir: str, output_dir: str) -> None:
     """convert ISAT format to MSCOCO format (modified from TOCOCO.py)"""
     coco_anno = {}
     coco_anno['info'] = {}
-    coco_anno['info']['description'] = 'Nectar seekers'
+    coco_anno['info']['description'] = ''
     coco_anno['info']['year'] = None
     coco_anno['info']['contributor'] = 'Ursina Baselgia'
     coco_anno['images'] = []
@@ -184,4 +184,3 @@ def to_coco(input_dir, output_dir):
     with open(output_dir, 'w', encoding='utf-8') as file:
         json.dump(coco_anno, file)
     return None
-
