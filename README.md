@@ -17,7 +17,7 @@
 
 ### 1. Select region of interest (ROI) and track it with [CSRT tracker](https://docs.opencv.org/3.4/d2/da2/classcv_1_1TrackerCSRT.html)
 This was used since the flower may dance with wind, and to reduce the field of view
-<img src="asserts/csrt_tracker.gif" /> </div>
+<img src="asserts/csrt_tracker-min.gif" /> </div>
 <br>
 
 
