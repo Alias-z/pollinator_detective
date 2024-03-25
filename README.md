@@ -5,12 +5,10 @@
 
 <br>
 
-## Contributors
-- Dr. Erik Solhaug: project leader
+## Contributors (Diana Santelia's Lab at ETH Zurich)
+- Dr. Diana Santelia / Dr. Erik Solhaug: project leaders
 - Ursina Baselgia: experiments and image annotation
 - Hongyuan Zhang: code implementation
-
-\*\*We are from Dr. Diana Santelia's Lab at ETH Zurich
 <br>
 
 ## Working flow
