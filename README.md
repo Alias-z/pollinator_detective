@@ -18,20 +18,17 @@
 ### 1. Select region of interest (ROI) and track it with [CSRT tracker](https://docs.opencv.org/3.4/d2/da2/classcv_1_1TrackerCSRT.html)
 This was used since the flower may dance with wind, and to reduce the field of view
 <img src="asserts/csrt_tracker-min.gif" width="500" height=auto /> </div>
-
 <br>
 
 
 ### 2. Detect pollinator within the ROI with [Swin-L-DINO](https://github.com/open-mmlab/mmdetection/tree/main/configs/dino)
 The pretrained catergories: Bumblebees, Flies, Honeybees, Hoverfly_A, Hoverfly_B, and Wildbees
-
 <br>
 
  
 ## Data preparation
 ### 1. Data annotation was done with [ISAT_with_segment_anything](https://github.com/yatengLG/ISAT_with_segment_anything)
 Consider trying our tool for our image annotation
-
 
 
 ### 2. Data clustering and sampling with [HDBSCAN](https://github.com/scikit-learn-contrib/hdbscan)
