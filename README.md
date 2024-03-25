@@ -1,7 +1,7 @@
 # pollinator_detective: 
-# detect and count pollinator visiting events from video frames
+# detect and count pollinator visits from video frames
 
-
+<img src="asserts/demo.png" /> </div>
 
 <br>
 
@@ -11,7 +11,6 @@
 - Hongyuan Zhang: code implementation
 
 \*\*We are from Dr. Diana Santelia's Lab at ETH Zurich
-
 <br>
 
 ## Working flow
@@ -43,3 +42,4 @@ To form a more balanced traning set by sampling each cluster
 ## Current bottleneck
 - Unblanced datasets in terms of number of pollinators in each catergoreis and pixel sizes of them
 - Hard to confirm if a pollinator is trully landed on the flower
+- Misidentified pollinators such as ants and beetles
