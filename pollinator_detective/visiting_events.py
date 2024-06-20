@@ -1,11 +1,12 @@
 """Module providing functions for counting pollinator visiting events"""
 # pylint: disable=line-too-long, multiple-statements, c-extension-no-member, no-member, no-name-in-module, relative-beyond-top-level, wildcard-import
 import os  # interact with the operating system
+from typing import Literal  # to support type hints
 import cv2  # OpenCV
 import numpy as np  # NumPy
 import pandas as pd  # for Excel sheet
 from tqdm import tqdm
-import pytesseract; pytesseract.pytesseract.tesseract_cmd = 'C://Programs//Tesseract-OCR//tesseract.exe'   # noqa: for OCR
+#import pytesseract; pytesseract.pytesseract.tesseract_cmd = 'C://Programs//Tesseract-OCR//tesseract.exe'   # noqa: for OCR
 from PIL import Image  # Pillow image processing
 from mmdet.utils import register_all_modules as mmdet_utils_register_all_modules  # register mmdet modules
 from mmdet.apis import init_detector as mmdet_apis_init_detector  # initialize mmdet model
@@ -22,12 +23,12 @@ class SegColors:
 
 
 Bug = [SegColors('Bumblebees', [255, 0, 0], 0),
-       SegColors('Flies', [0, 0, 255], 1),
-       SegColors('Honeybees', [255, 165, 0], 2),
-       SegColors('Hoverfly_A', [165, 42, 42], 3),
-       SegColors('Hoverfly_B', [64, 224, 208], 4),
-       SegColors('Wildbees', [255, 0, 255], 5),
-       SegColors('Others', [255, 223, 0], 6)]
+       SegColors('Flies', [255, 0, 0], 1),
+       SegColors('Honeybees', [255, 0, 0], 2),
+       SegColors('Hoverfly_A', [255, 0, 0], 3),
+       SegColors('Hoverfly_B', [255, 0, 0], 4),
+       SegColors('Wildbees', [255, 0, 0], 5),
+       SegColors('Others', [255, 0, 0], 6)]
 
 
 class VisitingEvents():
@@ -61,14 +62,14 @@ class VisitingEvents():
         self.wildbees_threshold = wildbees_threshold  # object detection threshold for wildbees
         self.others_threshold = others_threshold  # object detection threshold for other bugs
 
-    def get_video_paths(self):
+    def get_video_paths(self) -> list:
         """Get the paths of videos under a given folder"""
         file_names = sorted(os.listdir(self.input_dir), key=str.casefold)  # list of all files under the input directory
         file_names = [name for name in file_names if any(name.lower().endswith(file_type) for file_type in video_types) and 'predictions' not in name.lower()]  # select only source video files
         file_paths = [os.path.join(self.input_dir, file_name) for file_name in file_names]  # get the paths of these video files
         return file_paths
 
-    def select_roi(self, video_path):
+    def select_roi(self, video_path: str) -> tuple:
         """Select the ROI for a video tracker"""
         video = cv2.VideoCapture(video_path)  # load the video
         success, frame = video.read()  # read each video frame
@@ -77,7 +78,7 @@ class VisitingEvents():
         video.release(); cv2.destroyAllWindows()  # noqa: quite video viewing
         return bbox
 
-    def extract_frames(self, video_path, roi_bbox):
+    def extract_frames(self, video_path: str, roi_bbox: tuple) -> str:
         """Extract all frames from a video and initiate CSRT tracker"""
         output_dir, _ = os.path.splitext(video_path)  # get the video path excluding the file extension
         if self.save_frames:
@@ -102,8 +103,9 @@ class VisitingEvents():
             success, frame = video.read()  # read each video frame
             if not success:
                 break
-            ocr_region = frame[980:1080, 700:1200]  # crop to OCR region
-            text = pytesseract.image_to_string(cv2.cvtColor(ocr_region, cv2.COLOR_BGR2GRAY))  # get the OCR result
+            # ocr_region = frame[980:1080, 700:1200]  # crop to OCR region
+            # text = pytesseract.image_to_string(cv2.cvtColor(ocr_region, cv2.COLOR_BGR2GRAY))  # get the OCR result
+            text = 'placeholder'
             lines = text.split('\n')  # separate text by spaces
             text = next((line for line in lines if 'TLC' in line), 'No match found')  # extract text starting with TLC
             timing.append(text)  # append timestamp
@@ -134,7 +136,8 @@ class VisitingEvents():
         result.to_excel(excel_filename, index=False)
         return output_dir
 
-    def video_buffer(self, video_path):
+    @staticmethod
+    def video_buffer(video_path: str) -> list:
         """Preload all video frames into memory"""
         video = cv2.VideoCapture(video_path)  # load the video
         frames = []  # to store all frames
@@ -146,9 +149,10 @@ class VisitingEvents():
         video.release()
         return frames
 
-    def visualize_tracking(self, video_path):
+    @staticmethod
+    def visualize_tracking(video_path: str) -> None:
         """Load a video and tracker npy file for visualization"""
-        frames = self.video_buffer(video_path)  # load the video frames
+        frames = VisitingEvents.video_buffer(video_path)  # load the video frames
         roi_locations = np.load(f'{os.path.splitext(video_path)[0]}.npy').tolist()   # load the ROI locations
         paused, current_frame = True, 0  # to pause at a given frame or move around
         print('loading video and ROI locations')
@@ -177,19 +181,20 @@ class VisitingEvents():
                     paused = True
         finally:
             cv2.destroyAllWindows()
+        return None
 
-    def batch4videos(self, mode='E'):
+    def batch4videos(self, mode: Literal['Extraction', 'Visualization'] = 'Extraction') -> None:
         """Extract frames from all videos or visualize the tracking"""
         video_paths = self.get_video_paths()  # get all video paths
-        if mode == 'E':  # extraction mode
+        if mode == 'Extraction':  # extraction mode
             roi_bboxes = [self.select_roi(video_path) for video_path in video_paths]
             for idx, video_path in enumerate(video_paths):
                 self.extract_frames(video_path, roi_bboxes[idx])
-        elif mode == 'V':  # visualization mode
+        elif mode == 'Visualization':  # visualization mode
             _ = [self.visualize_tracking(video_path) for video_path in video_paths]
         return None
 
-    def frames_to_video(self, frames, output_path, fps=30):
+    def frames_to_video(self, frames: list, output_path: str, fps: int = 30) -> None:
         """Convert a list of frames (NumPy arrays) to a video file"""
         height, width, _ = frames[0].shape  # get the dimensions of the first frame
         fourcc = cv2.VideoWriter_fourcc(*'DIVX')  # 'DIVX' for AVI
@@ -199,10 +204,11 @@ class VisitingEvents():
         video.release()  # Release the video writer object
         return None
 
-    def bug_detector(self, video_path):
+    def bug_detector(self, video_path: str) -> list:
         """Detect pollinators for all frames under a given folder"""
         output_dir = os.path.join(os.path.splitext(video_path)[0],
                                   f'predictions bb{self.bumblebees_threshold} fl{self.flies_threshold} hb{self.honeybees_threshold} fa{self.hoverfly_a_threshold} fb{self.hoverfly_b_threshold} wb{self.wildbees_threshold} o{self.others_threshold}')
+
         os.makedirs(output_dir, exist_ok=True)  # create directory for frames
 
         def bboxes_postprocess(roi_area, bboxes, labels, scores):
@@ -259,7 +265,7 @@ class VisitingEvents():
         bboxes = [result.pred_instances.bboxes.cpu().numpy() for result in results]  # get the predicted bboxes
         n_bugs, new_frames = [], []
         for idx, frame in tqdm(enumerate(frames), total=len(frames)):
-            frame = frame.copy()  # prevent chang in position
+            frame = frame.copy()  # prevent change in position
             valid_labels, valid_bboxes, valid_scores = [], [], []
             n_bumblebees, n_flies, n_honeybees, n_hoverfly_a, n_hoverfly_b, n_wildbees = 0, 0, 0, 0, 0, 0
             for bug in Bug:
@@ -269,7 +275,7 @@ class VisitingEvents():
                     valid_labels.append([labels[idx][ind] for ind in indices][0])
                     valid_bboxes.append([bboxes[idx][ind] for ind in indices][0])   # all bboxes (>threshold) for a given bug class
                     valid_scores.append([scores[idx][ind] for ind in indices][0])
-                if len(valid_bboxes) >= 2:
+                if len(valid_bboxes) > 2:
                     roi_area = roi_locations[idx].shape[0] * roi_locations[idx].shape[1]  # get the ROI area
                     valid_bboxes, valid_labels, valid_scores = bboxes_postprocess(roi_area, valid_bboxes, valid_labels, valid_scores)
             valid_bboxes = [np.array(bbox, dtype=np.int32) for bbox in valid_bboxes]
@@ -293,7 +299,7 @@ class VisitingEvents():
                 x_1, y_1, x_2, y_2 = valid_bboxes[idx_2]  # bug bbox in mmdet format
                 x_1 += ox_1; y_1 += oy_1; x_2 += ox_1; y_2 += oy_1  # noqa: map bboxes back to the image
                 cv2.rectangle(frame, (x_1, y_1), (x_2, y_2), Bug[label].mask_rgb, 3)  # draw the bug bboxes
-                cv2.putText(frame, f'{bug_type}, p={round(float(valid_scores[idx_2]), 2)}', (x_1, y_1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, Bug[label].mask_rgb, 2)  # draw the bug types and scores
+                cv2.putText(frame, f'{bug_type}, p={round(float(valid_scores[idx_2]), 2)}', (x_1, y_1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, Bug[label].mask_rgb, 2)  # draw the bug types and scores
             if self.save_frames:
                 cv2.imwrite(os.path.join(output_dir, f'frame {idx+1}.png'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))  # export the frames as images
             new_frames.append(frame)  # collect frams with bboxes
@@ -301,7 +307,7 @@ class VisitingEvents():
         self.frames_to_video(new_frames, f'{output_dir}.AVI')
         return np.array(n_bugs).T.tolist()
 
-    def count_visits(self, frames, absence_window=2):
+    def count_visits(self, frames: list, absence_window: int = 2) -> list:
         """
         Analyze a given pollinator visits and their durations through video frames.
 
@@ -350,7 +356,7 @@ class VisitingEvents():
                 completed_events.append((start_frame, -1))
         return completed_events
 
-    def counts2excel(self, video_path, absence_window_range):
+    def counts2excel(self, video_path: str, absence_window_range: list) -> None:
         """Count visiting events for all pollinator types and output to an Excel file"""
         if absence_window_range is None:
             absence_window_range = [2]
@@ -384,7 +390,7 @@ class VisitingEvents():
             result.to_excel(excel_filename, index=False)
         return None
 
-    def batch_predict(self, absence_window_range=None):
+    def batch_predict(self, absence_window_range: any = None) -> None:
         """Batch predit for all video frames (subfolders) under a given parent folder"""
         if absence_window_range is None:
             absence_window_range = [2]
